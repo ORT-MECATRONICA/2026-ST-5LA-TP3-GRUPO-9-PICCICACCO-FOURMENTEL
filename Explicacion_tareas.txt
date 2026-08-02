@@ -1,0 +1,2 @@
+La tarea 1 no bloquea a la tarea 2 porque cada una está asignada a dos núcleos distintos
+que funcionan independientemente de lo que ocurra en el otro núcleo.
