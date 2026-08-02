@@ -1,0 +1,273 @@
+//Grupo 9 Piccicacco-Fourmentel
+#include <ArduinoJson.h>
+#include <ArduinoJson.hpp>
+
+#include <UniversalTelegramBot.h>
+
+#include <WiFi.h>
+#include <WiFiClientSecure.h>
+
+#include <Adafruit_Sensor.h>
+#include <DHT.h>
+#include <DHT_U.h>
+#include <U8g2lib.h>
+
+#define DHTPIN 23  // Pin del sensor de temperatura
+#define DHTTYPE DHT11
+#define LED 25
+#define BOTON_1 35
+#define BOTON_2 34
+
+#define BOTtoken "8884119382:AAHkfGuicM97rFiye-yv45BBiEYcfp8zp-s"
+#define CHAT_ID "7569009265"
+
+TaskHandle_t TareaMaquina;
+TaskHandle_t TareaTelegram;
+
+const char* ssid = "MECA-IoT-V2";
+const char* password = "IoT$2026";
+WiFiClientSecure client;
+UniversalTelegramBot bot(BOTtoken, client);
+
+U8G2_SH1106_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, U8X8_PIN_NONE);
+DHT_Unified dht(DHTPIN, DHTTYPE);
+
+bool alertaEnviada = false;
+int boton1;
+int boton2;
+int valorUmbral = 24;
+volatile int tempActual = 0;
+unsigned long int tiempoAnterior = 0;
+String alerta = "ALERTA. LA TEMPERATURA SUPERÓ A LA TEMPERATURA UMBRAL";
+
+enum Estados {
+  PANTALLA_1,
+  PASO_1,
+  PASO_2,
+  PASO_3,
+  PASO_4,
+  PASO_5,
+  PANTALLA_2,
+  ESPERA_SUMA,
+  ESPERA_RESTA,
+  ESPERA_2
+};
+
+Estados estadoActual = PANTALLA_1;
+
+void maquina(Estados estado, float temperatura);
+void imprimir1(float temperatura);
+void imprimir2();
+
+void setup() {
+  Serial.begin(115200);
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid, password);
+  client.setCACert(TELEGRAM_CERTIFICATE_ROOT);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+
+  Serial.println("");
+  Serial.println("WiFi connected");
+  Serial.begin(115200);
+
+  pinMode(BOTON_1, INPUT);
+  pinMode(BOTON_2, INPUT);
+  pinMode(LED, OUTPUT);
+  digitalWrite(LED, LOW);
+
+  u8g2.begin();
+  u8g2.clearBuffer();
+  dht.begin();
+
+  sensor_t sensor;
+  dht.temperature().getSensor(&sensor);
+
+  xTaskCreatePinnedToCore(codigoMaquina, "maquina", 10000, NULL, 1, &TareaMaquina, 0);
+  xTaskCreatePinnedToCore(codigoTelegram, "Telegram", 10000, NULL, 1, &TareaTelegram, 1);
+
+  bot.sendMessage(CHAT_ID, "Bot started up");
+}
+
+void loop() {
+}
+
+void codigoMaquina(void* parameter) {
+  Serial.println("Pantalla 1");
+  while (true) {
+    sensors_event_t event;
+    dht.temperature().getEvent(&event);
+    boton1 = digitalRead(BOTON_1);
+    boton2 = digitalRead(BOTON_2);
+    tempActual = event.temperature;
+    maquina(estadoActual, tempActual);
+  }
+  vTaskDelay(10 / portTICK_PERIOD_MS);
+}
+
+void codigoTelegram(void *parameter) {
+  while (true) {
+    if (tempActual >= valorUmbral) {
+      if(!alertaEnviada){
+        bot.sendMessage(CHAT_ID, alerta);
+        alertaEnviada = true;
+      }
+      digitalWrite(LED,HIGH);
+    } else{
+      digitalWrite(LED,LOW);
+      alertaEnviada = false;
+    }
+
+    int numNuevosMensajes = bot.getUpdates(bot.last_message_received + 1);
+    while (numNuevosMensajes > 0) {
+      for (int i = 0; i < numNuevosMensajes; i++) {
+        String chat_id = String(bot.messages[i].chat_id);
+        String texto = bot.messages[i].text;
+        String nombre = bot.messages[i].from_name;
+
+        if (texto == "/temperatura" && chat_id == CHAT_ID) {
+          String respuesta = "Temperatura actual: " + String(tempActual);
+          bot.sendMessage(chat_id, respuesta);
+        }
+      }
+      numNuevosMensajes = bot.getUpdates(bot.last_message_received + 1);
+    }
+    vTaskDelay(2000 / portTICK_PERIOD_MS);
+  }
+}
+
+void maquina(Estados estado, float temperatura) {
+  switch (estado) {
+    case PANTALLA_1:
+      imprimir1(temperatura);
+      if (boton1 == LOW) {
+        Serial.println("Paso 1");
+        estadoActual = PASO_1;
+      }
+      break;
+
+    case PASO_1:
+      if (boton1 == HIGH) {
+        Serial.println("Paso 2");
+        tiempoAnterior = millis();
+        estadoActual = PASO_2;
+      }
+      break;
+
+    case PASO_2:
+      if (boton2 == LOW) {
+        Serial.println("Paso 3");
+        estadoActual = PASO_3;
+      }
+      if (boton1 == HIGH && millis() - tiempoAnterior >= 5000) {
+        Serial.println("Vuelve a 1");
+        estadoActual = PANTALLA_1;
+      }
+      break;
+
+    case PASO_3:
+      if (boton2 == HIGH) {
+        Serial.println("Paso 4");
+        tiempoAnterior = millis();
+        estadoActual = PASO_4;
+      }
+      break;
+
+    case PASO_4:
+      if (boton1 == LOW) {
+        Serial.println("Paso 5");
+        estadoActual = PASO_5;
+      }
+      if (boton1 == HIGH && millis() - tiempoAnterior >= 5000) {
+        Serial.println("Vuelve a 1");
+        estadoActual = PANTALLA_1;
+      }
+      break;
+
+    case PASO_5:
+      if (boton1 == HIGH) {
+        Serial.println("Pantalla 2");
+        estadoActual = PANTALLA_2;
+      }
+      break;
+
+    case PANTALLA_2:
+      imprimir2();
+      if (boton1 == LOW) {
+        Serial.println("Esperando suma");
+        estadoActual = ESPERA_SUMA;
+      }
+      if (boton2 == LOW) {
+        Serial.println("Esperando resta");
+        estadoActual = ESPERA_RESTA;
+      }
+      break;
+
+    case ESPERA_SUMA:
+      if (boton1 == HIGH) {
+        valorUmbral++;
+        Serial.print("valorUmbral: " + String(valorUmbral) + ". ");
+        Serial.println("Suma realizada. Pantalla 2");
+        estadoActual = PANTALLA_2;
+      }
+      if (boton2 == LOW) {
+        Serial.println("Espera 2");
+        estadoActual = ESPERA_2;
+      }
+      break;
+
+    case ESPERA_RESTA:
+      if (boton2 == HIGH) {
+        valorUmbral--;
+        Serial.print("valorUmbral: " + String(valorUmbral) + ". ");
+        Serial.println("Resta realizada. Pantalla 2");
+        estadoActual = PANTALLA_2;
+      }
+      if (boton1 == LOW) {
+        Serial.println("Espera 2");
+        estadoActual = ESPERA_2;
+      }
+      break;
+
+    case ESPERA_2:
+      if (boton1 == HIGH && boton2 == HIGH) {
+        Serial.println("Pantalla 1");
+        estadoActual = PANTALLA_1;
+      }
+      break;
+  }
+}
+
+void imprimir1(float temperatura) {
+  char stemp[10];
+  char svu[10];
+  snprintf(stemp, sizeof(stemp), "%.1f", temperatura);
+  itoa(valorUmbral, svu, 10);
+
+  u8g2.clearBuffer();
+  u8g2.setFont(u8g2_font_8x13_tr);
+
+  u8g2.drawStr(10, 30, "Temp:");
+  u8g2.drawStr(50, 30, stemp);
+  u8g2.drawStr(80, 30, " C");
+
+  u8g2.drawStr(10, 50, "VU:");
+  u8g2.drawStr(35, 50, svu);
+  u8g2.drawStr(50, 50, " C");
+  u8g2.sendBuffer();
+  vTaskDelay(10 / portTICK_PERIOD_MS);
+}
+
+void imprimir2() {
+  char svu[10];
+  itoa(valorUmbral, svu, 10);
+  u8g2.clearBuffer();
+  u8g2.setFont(u8g2_font_8x13_tr);
+  u8g2.drawStr(10, 50, "VU:");
+  u8g2.drawStr(35, 50, svu);
+  u8g2.drawStr(50, 50, " C");
+  u8g2.sendBuffer();
+  vTaskDelay(10 / portTICK_PERIOD_MS);
+}
